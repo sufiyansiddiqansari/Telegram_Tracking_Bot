@@ -1,0 +1,6 @@
+python-telegram-bot==20.3
+websocket-client==1.6.1
+requests==2.31.0
+nest-asyncio==1.5.8
+flask==3.0.0
+python-dotenv==1.0.0
