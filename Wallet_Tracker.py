@@ -86,7 +86,7 @@ def get_inline_keyboard(chat_id, command_name):
 # 1. /start
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.effective_message.reply_text(
-        "Bot Activated 🐳\nClick the Menu button (/) or type /help to see all 10 available commands!"
+        "Bot Activated 🐳\nClick the Menu button (/) or type /help to see all 13 available commands!"
     )
 
 # 2. /help
@@ -98,12 +98,12 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "3. /addwallet <nickname> <address> - Start tracking a new trader.\n"
         "4. /removewallet [nickname] - Stop tracking a trader.\n"
         "5. /listwallets - Display all currently tracked whales.\n"
-        "6. /open [nickname] - View all live open positions (Crypto, Spot, Metals).\n"
-        "7. /recent [nickname] - View the last 3 fully closed trades with PNL.\n"
-        "8. /last [nickname] - View only the single most recent closed trade.\n"
-        "9. /pnl [nickname] - Determine their total historical realized profit & loss.\n"
-        "10. /balance [nickname] - Check their combined account equity.\n"
-        "11. /metrics [nickname] - View advanced statistics (Win Rate, Drawdown).\n"
+        "6. /open  - View all live open positions (Crypto, Spot, Metals).\n"
+        "7. /recent - View the last 3 fully closed trades with PNL.\n"
+        "8. /last - View only the single most recent closed trade.\n"
+        "9. /pnl - Determine their total historical realized profit & loss.\n"
+        "10. /balance - Check their combined account equity.\n"
+        "11. /metrics - View advanced statistics (Win Rate, Drawdown).\n"
         "12. /toptraders - Discover top hyperliquid wallets to copy.\n"
         "13. /market - View 24h market volatility for top 10 tokens.\n\n"
         "💡 *Tip: If you run a command without a nickname, an interactive menu will pop up!*"
