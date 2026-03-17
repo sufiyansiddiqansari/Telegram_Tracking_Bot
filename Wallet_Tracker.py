@@ -157,11 +157,52 @@ async def listwallets(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if not user_wallets:
         await update.effective_message.reply_text("No wallets tracked currently.")
-    else:
-        text = "Tracked Wallets:\n\n"
-        for name, addr in user_wallets.items():
-            text += f"🔹 {name} : {addr}\n"
-        await update.effective_message.reply_text(text)
+        return
+
+    # Inform the user before performing potentially long queries
+    await update.effective_message.reply_text(f"Fetching 7-day performance data for {len(user_wallets)} wallets. Please wait...")
+    
+    stats_list = []
+    for name, addr in user_wallets.items():
+        try:
+            pnl_7d, roi_7d = get_7d_stats(addr)
+            stats_list.append({
+                'name': name,
+                'address': addr,
+                'pnl': pnl_7d,
+                'roi': roi_7d
+            })
+        except Exception as e:
+            print(f"Error fetching stats for {name}: {e}")
+            stats_list.append({
+                'name': name,
+                'address': addr,
+                'pnl': 0.0,
+                'roi': 0.0
+            })
+            
+    # Sort by ROI descending
+    stats_list.sort(key=lambda x: x['roi'], reverse=True)
+    
+    text = f"📊 **Tracked Wallets Leaderboard ({len(user_wallets)} Total)** 📊\n\n"
+    for idx, stat in enumerate(stats_list, 1):
+        pnl_str = f"+${round(stat['pnl'], 2):,}" if stat['pnl'] >= 0 else f"-${abs(round(stat['pnl'], 2)):,}"
+        roi_str = f"+{round(stat['roi'], 2)}%" if stat['roi'] >= 0 else f"{round(stat['roi'], 2)}%"
+        
+        entry_str = f"**#{idx} {stat['name']}**\n"
+        entry_str += f"`{stat['address']}`\n"
+        entry_str += f"7D PnL: {pnl_str} | 7D ROI: {roi_str}\n"
+        entry_str += "-" * 20 + "\n"
+        
+        # Telegram max message size is 4096 chars, gracefully split if too large
+        if len(text) + len(entry_str) > 4000:
+            await update.effective_message.reply_text(text, parse_mode="Markdown")
+            text = entry_str
+        else:
+            text += entry_str
+            
+    if text:
+        await update.effective_message.reply_text(text, parse_mode="Markdown")
 
 # 6. /open
 async def open_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -317,6 +358,7 @@ def parse_historical_closed_trades(address):
                 'avg_exit': avg_exit,
                 'pnl': state['pnl'],
                 'roi': roi,
+                'entry_val': state['entry_val'],
                 'open_time': state['open_time'],
                 'close_time': fill.get('time', 0)
             })
@@ -326,6 +368,23 @@ def parse_historical_closed_trades(address):
             
     # Newest closed trades last
     return closed_trades
+
+# Helper: Fetch 7-day stats for leaderboard
+def get_7d_stats(address):
+    closed_trades = parse_historical_closed_trades(address)
+    now_ts = int(time.time() * 1000)
+    seven_days_ms = 7 * 24 * 60 * 60 * 1000
+    
+    total_pnl = 0.0
+    total_entry_val = 0.0
+    
+    for trade in closed_trades:
+        if now_ts - trade['close_time'] <= seven_days_ms:
+            total_pnl += trade['pnl']
+            total_entry_val += trade.get('entry_val', 0.0)
+            
+    roi = (total_pnl / total_entry_val) * 100 if total_entry_val > 0 else 0.0
+    return total_pnl, roi
 
 # 7. /recent
 async def recent(update: Update, context: ContextTypes.DEFAULT_TYPE):
