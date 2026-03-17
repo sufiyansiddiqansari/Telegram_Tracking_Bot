@@ -1,26 +1,39 @@
 import requests
 
-# Test metaAndAssetCtxs
+print("Testing market...")
 res = requests.post("https://api.hyperliquid.xyz/info", json={"type": "metaAndAssetCtxs"}).json()
-print("metaAndAssetCtxs keys:", len(res))
+meta = res[0]
+ctxs = res[1]
 
-if isinstance(res, list) and len(res) == 2:
-    meta = res[0]
-    ctxs = res[1]
-    print("Found ctxs for", len(ctxs), "assets")
-    if len(ctxs) > 0:
-        print("Sample ctx:", ctxs[0])
+universe = meta.get("universe", [])
+assets = []
+for i, ctx in enumerate(ctxs):
+    if i < len(universe):
+        coin = universe[i]["name"]
+        vol = float(ctx.get("dayNtlVlm", 0))
+        px = float(ctx.get("markPx", 0))
+        prev_px = float(ctx.get("prevDayPx", px))
+        volatility = ((px - prev_px) / prev_px) * 100 if prev_px > 0 else 0
+        assets.append({"coin": coin, "vol": vol, "volatility": volatility})
 
-print("---")
-# Test vaults exploring or leaderboards natively
+assets.sort(key=lambda x: x["vol"], reverse=True)
+print(assets[:3])
+
+print("Testing toptraders/vaults...")
 try:
-    res = requests.post("https://api.hyperliquid.xyz/info", json={"type": "explorerVitals"}).json()
-    print("Explorer vitals:", type(res))
-except:
-    pass
+    res = requests.post("https://api.hyperliquid.xyz/info", json={"type": "vaults"}).json()
+    print("Vaults test type payload length:", len(res) if isinstance(res, list) else "not list")
+except Exception as e:
+    print(e)
     
 try:
-    res = requests.post("https://api.hyperliquid.xyz/info", json={"type": "openapi", "content": "vaults"}).json()
-    print("Vaults test1:", type(res))
-except:
+    res = requests.post("https://api.hyperliquid.xyz/info", json={"type": "meta", "content": "vaults"}).json()
+    print(res)
+except Exception as e:
+    pass
+
+try:
+    res = requests.post("https://api.hyperliquid.xyz/info", json={"type": "explorerVitals"}).json()
+    print(res)
+except Exception as e:
     pass
