@@ -102,7 +102,10 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "7. /recent [nickname] - View the last 3 fully closed trades with PNL.\n"
         "8. /last [nickname] - View only the single most recent closed trade.\n"
         "9. /pnl [nickname] - Determine their total historical realized profit & loss.\n"
-        "10. /balance [nickname] - Check their combined account equity.\n\n"
+        "10. /balance [nickname] - Check their combined account equity.\n"
+        "11. /metrics [nickname] - View advanced statistics (Win Rate, Drawdown).\n"
+        "12. /toptraders - Discover top hyperliquid wallets to copy.\n"
+        "13. /market - View 24h market volatility for top 10 tokens.\n\n"
         "💡 *Tip: If you run a command without a nickname, an interactive menu will pop up!*"
     )
     await update.effective_message.reply_text(help_text, parse_mode="Markdown")
