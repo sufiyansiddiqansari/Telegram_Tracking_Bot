@@ -537,23 +537,56 @@ async def metrics_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # 12. /toptraders
 async def toptraders_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-        text = "🏆 **Top Hyperliquid Vault Traders** 🏆\n\n"
-        text += "Here are heavily verified Top Traders you can instantly track:\n"
+        url = "https://api.hyperdash.com/graphql"
+        payload = {
+            "operationName": "ExploreTraders",
+            "variables": {
+                "page": 1,
+                "pageSize": 10,
+                "timeframe": "thirty_days",
+                "sortBy": {"field": "pnl", "order": "desc"}
+            },
+            "query": """
+            query ExploreTraders($page: Int, $pageSize: Int, $timeframe: TraderTimeframe!, $sortBy: TraderSortInput) {
+              exploreTraders(page: $page, pageSize: $pageSize, timeframe: $timeframe, sortBy: $sortBy) {
+                data {
+                  address
+                  displayName
+                  pnl
+                  winrate
+                  sharpe
+                  drawdown
+                }
+              }
+            }
+            """
+        }
+        res = requests.post(url, json=payload).json()
+        top_traders = res['data']['exploreTraders']['data']
         
-        # Hardcoding known, massive public vaults for quick discovery
-        top_vaults = [
-            {"name": "HLP (Core Liquidity)", "address": "0xdfc24b077bc14252089fb23d0628e93dc49c1221", "apr": "45.2%"},
-            {"name": "Ethena Delta Neutral", "address": "0x6f69ca00b467ec746914ed07567e67175f782c5a", "apr": "22.4%"},
-            {"name": "Justin Sun (Whale)", "address": "0x3ddfa8ec3052539b6c9549f12cea2c295cff5296", "apr": "N/A (Whale)"},
-        ]
-        
+        text = "🏆 **Global Top 10 Traders (Last 30 Days)** 🏆\n\n"
         keyboard = []
-        for v in top_vaults:
-            text += f"🔹 **{v['name']}** | APR: {v['apr']}\n"
-            keyboard.append([InlineKeyboardButton(f"Track {v['name']}", callback_data=f"autoadd:{v['name']}:{v['address']}")])
+        
+        for idx, t in enumerate(top_traders, 1):
+            addr = t.get('address', '')
+            name = t.get('displayName') or f"{addr[:6]}...{addr[-4:]}"
+            
+            pnl = float(t.get('pnl') or 0)
+            winrate = float(t.get('winrate') or 0) * 100
+            sharpe = float(t.get('sharpe') or 0)
+            
+            pnl_str = f"+${round(pnl, 2):,}" if pnl > 0 else f"-${abs(round(pnl, 2)):,}"
+            hd_link = f"https://hyperdash.com/address/{addr}"
+            
+            text += f"{idx}. **{name}**\n"
+            text += f"💰 30D PNL: {pnl_str} | Win Rate: {round(winrate, 1)}%\n"
+            text += f"🔗 [View Hyperdash Analytics]({hd_link})\n\n"
+            
+            # The callback data is compressed to 'add:<address>' to fit Telegram's 64 byte limit
+            keyboard.append([InlineKeyboardButton(f"Track {name}", callback_data=f"add:{addr}")])
             
         markup = InlineKeyboardMarkup(keyboard)
-        await update.effective_message.reply_text(text, parse_mode="Markdown", reply_markup=markup)
+        await update.effective_message.reply_text(text, parse_mode="Markdown", reply_markup=markup, disable_web_page_preview=True)
     except Exception as e:
         await update.effective_message.reply_text(f"Error fetching Top Traders: {e}")
 
@@ -595,15 +628,17 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = query.data
     
     # Handle the instant Add shortcut from /toptraders
-    if data.startswith("autoadd:"):
-        _, name, addr = data.split(":", 2)
+    if data.startswith("add:"):
+        _, addr = data.split(":", 1)
+        # Create a compressed default nickname
+        name = f"TopTrader_{addr[:4]}"
         chat_id = str(update.effective_chat.id)
         wallets = load_wallets()
         if chat_id not in wallets:
             wallets[chat_id] = {}
         wallets[chat_id][name] = addr
         save_wallets(wallets)
-        await update.effective_message.reply_text(f"✅ Successfully auto-added Top Trader to your list: {name} -> {addr}")
+        await update.effective_message.reply_text(f"✅ Successfully auto-added Top Trader to your list: {name} -> {addr}\n(You can use /removewallet to remove them if you want to re-add them with a custom nickname later)")
         return
 
     command, nickname = data.split(':', 1)
@@ -625,6 +660,17 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await balance_command(update, context)
     elif command == "metrics":
         await metrics_command(update, context)
+
+def get_users_tracking_address(address):
+    interested_users = []
+    wallets = load_wallets()
+    if isinstance(wallets, dict):
+        for chat_id, user_wallets in wallets.items():
+            if isinstance(user_wallets, dict):
+                for nickname, tracked_addr in user_wallets.items():
+                    if tracked_addr.lower() == address.lower():
+                        interested_users.append((chat_id, nickname))
+    return interested_users
 
 # ---------------- POLLING (LIVE ALERTS) ---------------- #
 
