@@ -1,5 +1,4 @@
 import json
-import websocket
 import datetime
 import threading
 import requests
@@ -20,14 +19,31 @@ load_dotenv()
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
 
-seen_trades = set()
-open_positions = {}
-ws_app = None
+# To map Hyperliquid's asset indices to actual coin names (e.g. BTC, ETH)
+COIN_MAP = []
 
-# Global dictionary to buffer pending partial fills
-# Format: { order_key: {"total_size": float, "total_value": float, "nickname": str, "coin": str, "dir": str, "trade_time": str, "timer": threading.Timer} }
-pending_orders = {}
-order_lock = threading.Lock()
+def fetch_coin_map():
+    global COIN_MAP
+    try:
+        response = requests.post(
+            "https://api.hyperliquid.xyz/info",
+            headers={"Content-Type": "application/json"},
+            json={"type": "meta"}
+        )
+        data = response.json()
+        if "universe" in data:
+            COIN_MAP = [asset["name"] for asset in data["universe"]]
+            print(f"Loaded {len(COIN_MAP)} assets from Hyperliquid.")
+    except Exception as e:
+        print(f"Error fetching coin map: {e}")
+
+# Call this once on startup
+fetch_coin_map()
+
+# In-memory dictionary to store the last known states of users' positions
+# Used to detect actual position changes rather than partial order fills
+# Format: { wallet_address: { coin: { "size": float, "entry_price": float } } }
+known_positions = {}
 
 def load_wallets():
     if not os.path.exists("wallets.json"):
@@ -55,11 +71,10 @@ def send_message(chat_id, text):
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "Bot Activated 🐳\n\nUse commands:\n/addwallet <nickname> <address>\n/removewallet <nickname>\n/listwallets\n/recent <nickname>"
+        "Bot Activated 🐳\n\nUse commands:\n/addwallet <nickname> <address>\n/removewallet <nickname>\n/listwallets\n/open <nickname>"
     )
 
 async def addwallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global ws_app
     chat_id = str(update.effective_chat.id)
     if len(context.args) < 2:
         await update.message.reply_text("Usage: /addwallet <nickname> <address>\nExample: /addwallet Whale 0x123...")
@@ -74,17 +89,6 @@ async def addwallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
     wallets[chat_id][nickname] = wallet
     save_wallets(wallets)
-    
-    # Subscribe dynamically if WS is already running
-    if ws_app:
-        sub = {
-            "method": "subscribe",
-            "subscription": {
-                "type": "userFills",
-                "user": wallet
-            }
-        }
-        ws_app.send(json.dumps(sub))
         
     await update.message.reply_text(f"Wallet added: {nickname} -> {wallet}")
 
@@ -118,10 +122,10 @@ async def listwallets(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text += f"🔹 {name} : {addr}\n"
     await update.message.reply_text(text)
 
-async def recent(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def open_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = str(update.effective_chat.id)
     if len(context.args) < 1:
-        await update.message.reply_text("Usage: /recent <nickname>")
+        await update.message.reply_text("Usage: /open <nickname>")
         return
         
     nickname = context.args[0]
@@ -135,68 +139,54 @@ async def recent(update: Update, context: ContextTypes.DEFAULT_TYPE):
     address = user_wallets[nickname]
     
     try:
-        # Fetch recent fills via REST API
+        # Fetch actual live current positions using clearinghouseState
         response = requests.post(
             "https://api.hyperliquid.xyz/info",
             headers={"Content-Type": "application/json"},
-            json={"type": "userFills", "user": address}
+            json={"type": "clearinghouseState", "user": address}
         )
         data = response.json()
         
-        if not data or len(data) == 0:
-            await update.message.reply_text(f"No recent trades found for {nickname}.")
-            return
-            
-        # Group historical trades by Order ID (oid) so we get total positional sizes
-        aggregated_history = {}
-        for trade in data:
-            oid = trade.get("oid")
-            if not oid: 
-                continue
-                
-            if oid not in aggregated_history:
-                aggregated_history[oid] = []
-            aggregated_history[oid].append(trade)
-            
-        # We only want the last 3 unique completed orders
-        # The REST API returns chronological order, but we can verify by sorting
-        sorted_oids = sorted(aggregated_history.keys(), key=lambda o: aggregated_history[o][0].get("time", 0), reverse=True)
-        recent_oids = sorted_oids[:3]
+        asset_positions = data.get("assetPositions", [])
         
-        if not recent_oids:
-            await update.message.reply_text(f"No recent aggregated trades found for {nickname}.")
+        if not asset_positions:
+            await update.message.reply_text(f"📊 {nickname} currently has no open positions.")
             return
 
-        text = f"🕒 Last 3 Complete Trades for {nickname}:\n\n"
+        text = f"📊 Current Open Positions for {nickname}:\n\n"
         
-        for oid in recent_oids:
-            fills = aggregated_history[oid]
-            coin = fills[0].get("coin", "Unknown")
-            direction = fills[0].get("dir", "Unknown")
-            ts = fills[0].get("time", 0)
-            trade_time = datetime.datetime.fromtimestamp(ts / 1000).strftime('%Y-%m-%d %H:%M:%S')
+        for pos in asset_positions:
+            pos_data = pos.get("position", {})
+            coin = pos_data.get("coin")
             
-            # Calculate total average fill metrics for the single Order ID
-            total_sz = 0.0
-            total_val = 0.0
-            for f in fills:
-                sz = float(f.get("sz", 0))
-                px = float(f.get("px", 0))
-                total_sz += sz
-                total_val += (sz * px)
+            # If coin string is not provided directly, try to map from universe index
+            if not coin and "item" in pos_data and len(COIN_MAP) > 0:
+                 # Hyperliquid changed structure slightly over time; sometimes it's 'coin', sometimes it needs mapped if missing
+                 # However, 'coin' is usually explicitly inside 'position' in latest API
+                 pass 
+
+            szi = float(pos_data.get("szi", 0))
+            if szi == 0:
+                continue
                 
-            avg_px = total_val / total_sz if total_sz > 0 else 0
+            entry_px = float(pos_data.get("entryPx", 0))
+            unrealized_pnl = float(pos_data.get("unrealizedPnl", 0))
+            leverage = pos_data.get("leverage", {}).get("value", 1)
+            
+            direction = "LONG 🟢" if szi > 0 else "SHORT 🔴"
+            abs_size = abs(szi)
+            pnl_sign = "+" if unrealized_pnl >= 0 else ""
             
             text += f"Token: {coin}\n"
-            text += f"Action: {direction}\n"
-            text += f"Avg Price: ${round(avg_px, 4)}\n"
-            text += f"Total Size: {round(total_sz, 6)}\n"
-            text += f"Time: {trade_time}\n"
+            text += f"Action: {direction} ({leverage}x)\n"
+            text += f"Avg Entry: ${round(entry_px, 4)}\n"
+            text += f"Full Position Size: {round(abs_size, 6)}\n"
+            text += f"Unrealized PNL: {pnl_sign}${round(unrealized_pnl, 2)}\n"
             text += "-" * 20 + "\n"
             
         await update.message.reply_text(text)
     except Exception as e:
-        await update.message.reply_text(f"Error fetching recent trades: {e}")
+        await update.message.reply_text(f"Error fetching open positions: {e}")
 
 def get_users_tracking_address(address):
     wallets = load_wallets()
@@ -209,180 +199,102 @@ def get_users_tracking_address(address):
                         interested_users.append((chat_id, nickname))
     return interested_users
 
-def process_aggregated_order(order_key, interested_users, wallet):
-    with order_lock:
-        if order_key not in pending_orders:
-            return
-            
-        order_data = pending_orders.pop(order_key)
+def poll_positions():
+    """
+    Instead of using the userFills websocket (which sends partial order chunks),
+    we simply check every trader's actual portfolio state every 10 seconds.
+    If the absolute position size or coin changes, we send an alert with the complete size!
+    """
+    while True:
+        time.sleep(10) # Check every 10 seconds
         
-    total_size = order_data["total_size"]
-    total_value = order_data["total_value"]
-    avg_price = total_value / total_size if total_size > 0 else 0
-    
-    coin = order_data["coin"]
-    direction = order_data["dir"]
-    trade_time = order_data["trade_time"]
-    
-    pos_key = f"{wallet.lower()}_{coin}"
-    
-    if "Open" in direction:
-        # Check if they are adding to an existing position
-        if pos_key in open_positions:
-            prev_price = open_positions[pos_key]["price"]
-            prev_size = open_positions[pos_key].get("size", 0) # Fallback to 0 if not previously tracked
-            
-            # Very loose approximation of new average entry for display purposes
-            new_total_size = prev_size + total_size
-            if new_total_size > 0:
-                new_avg = ((prev_price * prev_size) + (avg_price * total_size)) / new_total_size
-            else:
-                new_avg = avg_price
+        wallets = load_wallets()
+        unique_addresses = set()
+        
+        if isinstance(wallets, dict):
+            for user_wallets in wallets.values():
+                if isinstance(user_wallets, dict):
+                    for addr in user_wallets.values():
+                        unique_addresses.add(addr.lower())
+                        
+        for address in unique_addresses:
+            interested_users = get_users_tracking_address(address)
+            if not interested_users:
+                continue
                 
-            open_positions[pos_key] = {
-                "price": new_avg,
-                "size": new_total_size,
-                "time": trade_time,
-                "dir": direction
-            }
-        else:
-            open_positions[pos_key] = {
-                "price": avg_price,
-                "size": total_size,
-                "time": trade_time,
-                "dir": direction
-            }
-        
-        for chat_id, nickname in interested_users:
-            msg = f"🚀 POSITION OPENED\nTrader: {nickname}\nToken: {coin}\nAction: {direction}\nAvg Entry: ${round(avg_price, 4)}\nTotal Size Issued: {round(total_size, 6)}\nTime: {trade_time}"
-            send_message(chat_id, msg)
-            
-    elif "Close" in direction:
-        entry_info = open_positions.get(pos_key)
-        if entry_info:
-            entry = entry_info["price"]
-            entry_time = entry_info["time"]
-            
-            if "Long" in direction:
-                pnl = ((avg_price - entry) / entry) * 100
-            else:
-                pnl = ((entry - avg_price) / entry) * 100
-                
-            for chat_id, nickname in interested_users:
-                msg = f"📉 POSITION CLOSED\nTrader: {nickname}\nToken: {coin}\nAction: {direction}\nEntry: ${round(entry, 4)}\nAvg Exit: ${round(avg_price, 4)}\nTotal Size Issued: {round(total_size, 6)}\nOpened: {entry_time}\nClosed: {trade_time}\nPnL: {round(pnl, 2)}%"
-                send_message(chat_id, msg)
-                
-        else:
-            for chat_id, nickname in interested_users:
-                msg = f"📉 POSITION CLOSED (Missed Entry)\nTrader: {nickname}\nToken: {coin}\nAction: {direction}\nAvg Exit: ${round(avg_price, 4)}\nTotal Size Issued: {round(total_size, 6)}\nTime: {trade_time}"
-                send_message(chat_id, msg)
-
-        # For simplicity, we assume a "Close" signal indicates they've closed the position entirely.
-        if pos_key in open_positions:
-            del open_positions[pos_key]
-
-def on_message(ws, message):
-    try:
-        data = json.loads(message)
-    except json.JSONDecodeError:
-        return
-
-    if data.get("channel") != "userFills":
-        return
-
-    payload = data.get("data", {})
-    wallet = payload.get("user")
-    if not wallet:
-        return
-
-    interested_users = get_users_tracking_address(wallet)
-    if not interested_users:
-        return
-
-    fills = payload.get("fills", [])
-    for trade in fills:
-        trade_id = trade.get("tid")
-        if trade_id in seen_trades:
-            continue
-        seen_trades.add(trade_id)
-
-        coin = trade.get("coin")
-        price = float(trade.get("px"))
-        size = float(trade.get("sz"))
-        direction = trade.get("dir", "")
-        ts = trade.get("time")
-        oid = trade.get("oid") # Order ID
-        
-        trade_time = datetime.datetime.fromtimestamp(ts / 1000).strftime('%Y-%m-%d %H:%M:%S')
-        
-        if not oid:
-            # Fallback if no order ID is present (unlikely on Hyperliquid)
-            oid = str(ts)
-            
-        order_key = f"{wallet.lower()}_{oid}"
-        
-        with order_lock:
-            if order_key in pending_orders:
-                # Add to existing pending order aggregation
-                pending_orders[order_key]["total_size"] += size
-                pending_orders[order_key]["total_value"] += (size * price)
-            else:
-                # Initialize new order buffer
-                pending_orders[order_key] = {
-                    "total_size": size,
-                    "total_value": size * price,
-                    "coin": coin,
-                    "dir": direction,
-                    "trade_time": trade_time,
-                }
-                
-                # Create a 2.0 second timer buffer that will fire 'process_aggregated_order'
-                timer = threading.Timer(
-                    2.0, 
-                    process_aggregated_order, 
-                    args=(order_key, interested_users, wallet)
+            try:
+                response = requests.post(
+                    "https://api.hyperliquid.xyz/info",
+                    headers={"Content-Type": "application/json"},
+                    json={"type": "clearinghouseState", "user": address}
                 )
-                pending_orders[order_key]["timer"] = timer
-                timer.start()
-
-def on_open(ws):
-    print("Websocket connected")
-    wallets = load_wallets()
-    subscribed_addresses = set()
-    
-    if isinstance(wallets, dict):
-        for chat_id, user_wallets in wallets.items():
-            if isinstance(user_wallets, dict):
-                for addr in user_wallets.values():
-                    if addr.lower() not in subscribed_addresses:
-                        sub = {
-                            "method": "subscribe",
-                            "subscription": {
-                                "type": "userFills",
-                                "user": addr
-                            }
-                        }
-                        ws.send(json.dumps(sub))
-                        subscribed_addresses.add(addr.lower())
-
-def on_error(ws, error):
-    print(f"Websocket error: {error}")
-
-def on_close(ws, close_status_code, close_msg):
-    print("Websocket closed. Reconnecting in 5 seconds...")
-    time.sleep(5)
-    start_ws()
-
-def start_ws():
-    global ws_app
-    ws_app = websocket.WebSocketApp(
-        "wss://api.hyperliquid.xyz/ws",
-        on_message=on_message,
-        on_open=on_open,
-        on_error=on_error,
-        on_close=on_close
-    )
-    ws_app.run_forever()
+                data = response.json()
+                asset_positions = data.get("assetPositions", [])
+                
+                if address not in known_positions:
+                    known_positions[address] = {}
+                    
+                current_state = {}
+                
+                # Parse the live state
+                for pos in asset_positions:
+                    pos_data = pos.get("position", {})
+                    coin = pos_data.get("coin")
+                    if not coin:
+                        continue
+                        
+                    szi = float(pos_data.get("szi", 0))
+                    if szi == 0:
+                        continue
+                        
+                    entry_px = float(pos_data.get("entryPx", 0))
+                    current_state[coin] = {
+                        "size": szi,
+                        "entry_price": entry_px
+                    }
+                    
+                    prev_state = known_positions[address].get(coin)
+                    
+                    if not prev_state:
+                         # Brand new position opened
+                         direction = "LONG" if szi > 0 else "SHORT"
+                         
+                         for chat_id, nickname in interested_users:
+                            msg = f"🚀 POSITION OPENED\nTrader: {nickname}\nToken: {coin}\nAction: {direction}\nAvg Entry: ${round(entry_px, 4)}\nTotal Position Size: {abs(szi)}\nTime: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+                            send_message(chat_id, msg)
+                            
+                    elif prev_state["size"] != szi:
+                         # Position size changed indicating an add or partial close, but we ONLY report the total new absolute size
+                         old_size = prev_state["size"]
+                         
+                         # Determine logic
+                         if (old_size > 0 and szi > old_size) or (old_size < 0 and szi < old_size):
+                             action_text = "ADDED TO POSITION"
+                         else:
+                             action_text = "PARTIALLY CLOSED"
+                             
+                         direction = "LONG" if szi > 0 else "SHORT"
+                         
+                         for chat_id, nickname in interested_users:
+                            msg = f"⚖️ POSITION UPDATED\nTrader: {nickname}\nToken: {coin}\nAction: {action_text} ({direction})\nNew Avg Entry: ${round(entry_px, 4)}\nTotal Position Size: {abs(szi)}\nTime: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+                            send_message(chat_id, msg)
+                
+                # Check for fully closed positions
+                for coin in list(known_positions[address].keys()):
+                    if coin not in current_state:
+                         # It was fully closed
+                         old_state = known_positions[address][coin]
+                         direction = "LONG" if old_state["size"] > 0 else "SHORT"
+                         
+                         for chat_id, nickname in interested_users:
+                            msg = f"📉 POSITION FULLY CLOSED\nTrader: {nickname}\nToken: {coin}\nAction: {direction}\nTotal Size Closed: {abs(old_state['size'])}\nTime: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+                            send_message(chat_id, msg)
+                            
+                # Update our known state memory
+                known_positions[address] = current_state
+                
+            except Exception as e:
+                print(f"Polling error for {address}: {e}")
 
 def start_bot():
     if not BOT_TOKEN:
@@ -394,9 +306,10 @@ def start_bot():
     app.add_handler(CommandHandler("addwallet", addwallet))
     app.add_handler(CommandHandler("removewallet", removewallet))
     app.add_handler(CommandHandler("listwallets", listwallets))
-    app.add_handler(CommandHandler("recent", recent))
+    app.add_handler(CommandHandler("open", open_command))
     
-    threading.Thread(target=start_ws, daemon=True).start()
+    # Start Portfolio Polling instead of WebSocket to avoid partial-fill spam entirely
+    threading.Thread(target=poll_positions, daemon=True).start()
     
     print("Telegram Bot Started!")
     app.run_polling()
