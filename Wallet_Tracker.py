@@ -739,9 +739,11 @@ def poll_positions():
                         for chat_id, nickname in interested_users:
                             if p_type == "PERP":
                                 direction = "LONG" if szi > 0 else "SHORT"
-                                msg = f"🚀 POSITION OPENED\nTrader: {nickname}\nToken: {coin}\nAction: {direction}\nAvg Entry: ${round(data['price'], 4)}\nTotal Position Size: {abs(szi)}\nTime: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+                                hd_link = f"https://hyperdash.com/address/{address}"
+                                ai_insight = "🚨 **AI Analysis:** Heavy New Conviction Entry" if abs(szi) * data['price'] > 20000 else "🧠 **AI Analysis:** Standard Size Entry"
+                                msg = f"🚀 **POSITION OPENED**\n**Trader:** {nickname}\n**Token:** {coin}\n**Action:** {direction}\n**Avg Entry:** ${round(data['price'], 4)}\n**Total Size:** {abs(szi)}\n\n{ai_insight}\n🔗 [View Trader on Hyperdash]({hd_link})\n⏱ {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
                             else:
-                                msg = f"🪙 SPOT ASSET PURCHASED\nTrader: {nickname}\nToken: {coin} (Spot/Metal)\nTotal Balance: {round(abs(szi), 6)}\nTime: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+                                msg = f"🪙 **SPOT ASSET PURCHASED**\n**Trader:** {nickname}\n**Token:** {coin} (Spot/Metal)\n**Total Balance:** {round(abs(szi), 6)}\n⏱ {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
                             send_message(chat_id, msg)
                     
                     elif prev_state_map[key]["size"] != szi:
@@ -749,14 +751,21 @@ def poll_positions():
                         old_size = prev_state_map[key]["size"]
                         
                         if p_type == "PERP":
-                            if (old_size > 0 and szi > old_size) or (old_size < 0 and szi < old_size):
-                                action = "ADDED TO POSITION"
-                            else:
-                                action = "PARTIALLY CLOSED"
+                            is_adding = (old_size > 0 and szi > old_size) or (old_size < 0 and szi < old_size)
+                            action = "ADDED TO POSITION" if is_adding else "PARTIALLY CLOSED"
                             direction = "LONG" if szi > 0 else "SHORT"
                             
+                            # Basic AI Analysis Logic
+                            change_pct = abs((szi - old_size) / old_size) * 100
+                            if is_adding:
+                                ai_insight = "🔥 **AI Analysis:** Doubling Down (High Conviction)" if change_pct > 50 else "📈 **AI Analysis:** Scaling In Slowly"
+                            else:
+                                ai_insight = "🏃‍♂️ **AI Analysis:** Panic / Rapid Exit" if change_pct > 70 else "💰 **AI Analysis:** Taking Partial Profits"
+                                
+                            hd_link = f"https://hyperdash.com/address/{address}"
+                            
                             for chat_id, nickname in interested_users:
-                                msg = f"⚖️ POSITION UPDATED\nTrader: {nickname}\nToken: {coin}\nAction: {action} ({direction})\nNew Avg Entry: ${round(data['price'], 4)}\nNew Absolute Size: {abs(szi)}\nTime: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+                                msg = f"⚖️ **POSITION UPDATED**\n**Trader:** {nickname}\n**Token:** {coin}\n**Action:** {action} ({direction})\n**New Avg Entry:** ${round(data['price'], 4)}\n**New Size:** {abs(szi)}\n\n{ai_insight}\n🔗 [View Trader on Hyperdash]({hd_link})\n⏱ {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
                                 send_message(chat_id, msg)
                         else:
                             # SPOT CHANGE
@@ -775,9 +784,11 @@ def poll_positions():
                          for chat_id, nickname in interested_users:
                             if p_type == "PERP":
                                 direction = "LONG" if old_szi > 0 else "SHORT"
-                                msg = f"📉 POSITION FULLY CLOSED\nTrader: {nickname}\nToken: {coin}\nAction: {direction}\nTotal Size Closed: {abs(old_szi)}\nTime: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+                                hd_link = f"https://hyperdash.com/address/{address}"
+                                ai_insight = "🚪 **AI Analysis:** Position Fully Closed and Exited"
+                                msg = f"📉 **POSITION FULLY CLOSED**\n**Trader:** {nickname}\n**Token:** {coin}\n**Action:** {direction}\n**Size Closed:** {abs(old_szi)}\n\n{ai_insight}\n🔗 [View Trader on Hyperdash]({hd_link})\n⏱ {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
                             else:
-                                msg = f"🛑 SPOT ASSET FULLY SOLD\nTrader: {nickname}\nToken: {coin} (Spot/Metal)\nAmount Sold: {abs(old_szi)}\nTime: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+                                msg = f"🛑 **SPOT ASSET FULLY SOLD**\n**Trader:** {nickname}\n**Token:** {coin} (Spot/Metal)\n**Amount Sold:** {abs(old_szi)}\n⏱ {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
                             send_message(chat_id, msg)
                             
                 known_positions[address] = current_state
