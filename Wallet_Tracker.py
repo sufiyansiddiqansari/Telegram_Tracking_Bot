@@ -371,20 +371,87 @@ def parse_historical_closed_trades(address):
 
 # Helper: Fetch 7-day stats for leaderboard
 def get_7d_stats(address):
-    closed_trades = parse_historical_closed_trades(address)
-    now_ts = int(time.time() * 1000)
+    try:
+        response = requests.post(
+            "https://api.hyperliquid.xyz/info",
+            headers={"Content-Type": "application/json"},
+            json={"type": "userFills", "user": address}
+        )
+        fills = response.json()
+        if not isinstance(fills, list) or len(fills) == 0:
+            fills = []
+        else:
+            fills.reverse()
+    except Exception:
+        fills = []
+        
+    now_ms = int(time.time() * 1000)
     seven_days_ms = 7 * 24 * 60 * 60 * 1000
     
-    total_pnl = 0.0
-    total_entry_val = 0.0
-    
-    for trade in closed_trades:
-        if now_ts - trade['close_time'] <= seven_days_ms:
-            total_pnl += trade['pnl']
-            total_entry_val += trade.get('entry_val', 0.0)
+    positions = {}
+    total_pnl_7d = 0.0
+    total_entry_val_7d = 0.0
+
+    for fill in fills:
+        coin = fill.get("coin")
+        if not coin: continue
+
+        sz = float(fill.get("sz", 0))
+        px = float(fill.get("px", 0))
+        fee = float(fill.get("fee", 0))
+        closed_pnl = float(fill.get("closedPnl", 0))
+        side = fill.get("side", "A")
+        fill_time = fill.get("time", 0)
+
+        dir_mult = 1 if side == "B" else -1
+        fill_sz = sz * dir_mult
+
+        if coin not in positions:
+            positions[coin] = {'sz': 0.0}
+
+        curr_sz = positions[coin]['sz']
+
+        is_closing = False
+        if (curr_sz > 0 and dir_mult < 0) or (curr_sz < 0 and dir_mult > 0):
+            is_closing = True
+
+        positions[coin]['sz'] += fill_sz
+
+        if now_ms - fill_time <= seven_days_ms:
+            total_pnl_7d += (closed_pnl - fee)
+            if is_closing:
+                closing_val = sz * px
+                if dir_mult < 0: # Selling to close LONG
+                    entry_val = closing_val - closed_pnl
+                else: # Buying to close SHORT
+                    entry_val = closing_val + closed_pnl
+                
+                total_entry_val_7d += entry_val
+
+    # Fetch unrealized PnL from open positions
+    try:
+        resp_perp = requests.post(
+            "https://api.hyperliquid.xyz/info",
+            headers={"Content-Type": "application/json"},
+            json={"type": "clearinghouseState", "user": address}
+        ).json()
+        
+        asset_positions = resp_perp.get("assetPositions", [])
+        for pos in asset_positions:
+            pos_data = pos.get("position", {})
+            szi = float(pos_data.get("szi", 0))
+            if szi == 0: continue
             
-    roi = (total_pnl / total_entry_val) * 100 if total_entry_val > 0 else 0.0
-    return total_pnl, roi
+            unrealized_pnl = float(pos_data.get("unrealizedPnl", 0))
+            position_value = float(pos_data.get("positionValue", 0))
+            
+            total_pnl_7d += unrealized_pnl
+            total_entry_val_7d += position_value
+    except Exception as e:
+        print(f"Error fetching open positions for {address}: {e}")
+
+    roi = (total_pnl_7d / total_entry_val_7d * 100) if total_entry_val_7d > 0 else 0.0
+    return total_pnl_7d, roi
 
 # 7. /recent
 async def recent(update: Update, context: ContextTypes.DEFAULT_TYPE):
